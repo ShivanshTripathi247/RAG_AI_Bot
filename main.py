@@ -26,6 +26,8 @@ load_dotenv()
 HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 HF_ENDPOINT_URL = os.getenv("HF_ENDPOINT_URL")
 MONGO_URI = os.getenv("MONGO_URI")
+FRONTEND_API_URL = os.getenv("FRONTEND_API_URL")
+BACKEND_API_URL = os.getenv("BACKEND_API_URL")
 
 # --- IMPORTANT: UPDATE THESE VALUES ---
 DB_NAME = "test"
@@ -181,8 +183,8 @@ def listen_for_product_changes():
 app = FastAPI(title="E-commerce AI Chatbot", description="An API for the e-commerce RAG chatbot.")
 
 origins = [
-    "http://localhost:5173", # Your React frontend's origin
-    "http://localhost:3000", # Another common React port
+    FRONTEND_API_URL, # Your React frontend's origin
+    BACKEND_API_URL, # Another common React port
     # Add your production frontend URL here when you deploy
 ]
 
