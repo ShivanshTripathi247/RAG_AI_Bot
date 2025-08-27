@@ -4,6 +4,7 @@ FROM python:3.11-slim
 # Set the working directory in the container
 WORKDIR /code
 
+ENV HF_HOME=/tmp/.cache/huggingface
 # Install system dependencies from packages.txt
 COPY packages.txt .
 RUN apt-get update && apt-get install -y --no-install-recommends $(cat packages.txt)
