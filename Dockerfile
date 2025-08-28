@@ -16,5 +16,5 @@ RUN pip install --no-cache-dir --upgrade -r requirements.txt
 # Copy the rest of the application code
 COPY . .
 
-# Command to run the application on the port HF expects
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]
+# Command to run the application on a standard port for GCP
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
