@@ -1,49 +1,36 @@
 import os
-from pymongo import MongoClient
+import logging
+import time
 from dotenv import load_dotenv
-from pinecone import Pinecone as PineconeClient
-from langchain_pinecone import Pinecone
-from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings
+from pymongo import MongoClient
 from langchain.schema.document import Document
 from langchain_community.document_loaders import DirectoryLoader
-from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings, HuggingFaceEndpointEmbeddings  
-import logging
+from langchain_huggingface import HuggingFaceEndpointEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter # <-- NEW IMPORT
+from pinecone import Pinecone as PineconeClient
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def create_knowledge_base():
     """
-    Connects to MongoDB, fetches product data, loads static text files,
-    and builds a combined FAISS vector store.
+    Connects to data sources, chunks documents, generates embeddings,
+    and upserts them to a Pinecone index.
     """
-    # 1. Load Environment Variables
+    # --- 1. Load Environment Variables and Data ---
     load_dotenv()
     mongo_uri = os.getenv("MONGO_URI")
+    hf_api_token = os.getenv("HF_API_TOKEN")
+    pinecone_api_key = os.getenv("PINECONE_API_KEY")
+    pinecone_index_name = os.getenv("PINECONE_INDEX_NAME")
+    embedding_endpoint_url = os.getenv("EMBEDDING_ENDPOINT_URL")
 
-    if not mongo_uri:
-        logging.error("MONGO_URI not found in .env file. Please add it.")
-        return
-
-    # --- IMPORTANT: UPDATE THESE VALUES ---
-    db_name = "test"
-    collection_name = "products"
-    # ------------------------------------
-
-    # 2. Connect to MongoDB and Fetch Products
-    try:
-        logging.info("Connecting to MongoDB...")
-        client = MongoClient(mongo_uri)
-        db = client[db_name]
-        collection = db[collection_name]
-        products = list(collection.find({}))
-        logging.info(f"Found {len(products)} products in MongoDB.")
-    except Exception as e:
-        logging.error(f"Failed to connect to MongoDB or fetch products: {e}")
-        return
-
-    # 3. Format MongoDB Documents for LangChain
+    # Fetch and format all documents from MongoDB and local files
+    client = MongoClient(mongo_uri)
+    db = client[os.getenv("DB_NAME", "test")]
+    collection = db[os.getenv("PRODUCTS_COLLECTION_NAME", "products")]
+    products = list(collection.find({}))
+    
     mongo_documents = []
     for product in products:
         page_content = (
@@ -63,50 +50,73 @@ def create_knowledge_base():
         }
         doc = Document(page_content=page_content, metadata=metadata)
         mongo_documents.append(doc)
-    logging.info(f"Formatted {len(mongo_documents)} documents from MongoDB.")
+    
+    file_documents = DirectoryLoader('./data/', glob="**/*.txt").load()
+    for doc in file_documents:
+        doc.metadata['source'] = 'static_file'
 
-    # --- NEW SECTION: LOAD STATIC FILES ---
-    try:
-        logging.info("Loading documents from the 'data' directory...")
-        # This looks for any .txt file in the ./data/ folder
-        loader = DirectoryLoader('./data/', glob="**/*.txt")
-        file_documents = loader.load()
-        for doc in file_documents:
-            doc.metadata['source'] = 'static_file' # Add source metadata for context
-        logging.info(f"Loaded {len(file_documents)} documents from files.")
-    except Exception as e:
-        logging.error(f"Failed to load static text files: {e}")
-        file_documents = [] # Ensure it's a list even if it fails
-    # ------------------------------------
-
-    # 4. Combine all documents into a single list
     all_documents = mongo_documents + file_documents
-    if not all_documents:
-        logging.error("No documents to process. Exiting.")
-        return
-    logging.info(f"Total documents to be indexed: {len(all_documents)}")
+    logging.info(f"Found {len(all_documents)} total documents to process.")
 
-    # 5. Embed and Store in FAISS
+    # --- NEW: SPLIT DOCUMENTS INTO SMALLER CHUNKS ---
+    logging.info("Splitting documents into smaller chunks...")
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=250, chunk_overlap=40)
+    doc_chunks = text_splitter.split_documents(all_documents)
+    logging.info(f"Split {len(all_documents)} documents into {len(doc_chunks)} chunks.")
+    # ------------------------------------------------
+
     try:
-        logging.info("Initializing embedding model...")
-        HF_API_TOKEN = os.getenv("HF_API_TOKEN")
-        PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-        PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME")
-        EMBEDDING_ENDPOINT_URL = os.getenv("EMBEDDING_ENDPOINT_URL") 
+        # --- 2. Initialize Clients ---
+        logging.info("Initializing embedding model and Pinecone client...")
         embedding_model = HuggingFaceEndpointEmbeddings(
-            model=EMBEDDING_ENDPOINT_URL,
-            huggingfacehub_api_token=HF_API_TOKEN
+            model=embedding_endpoint_url,
+            huggingfacehub_api_token=hf_api_token
         )
+        pc = PineconeClient(api_key=pinecone_api_key)
+        index = pc.Index(pinecone_index_name)
 
-        pc = PineconeClient(api_key=PINECONE_API_KEY)
-        vector_store = Pinecone.from_existing_index(
-            index_name=PINECONE_INDEX_NAME, 
-            embedding=embedding_model
-        )
-        logging.info("✅ Knowledge base successfully uploaded to Pinecone.")
+        # --- 3. Generate Embeddings for the Chunks ---
+        logging.info("Generating embeddings for all document chunks...")
+        texts_to_embed = [chunk.page_content for chunk in doc_chunks]
+        embeddings = embedding_model.embed_documents(texts_to_embed)
+        logging.info(f"Successfully generated {len(embeddings)} embeddings.")
+
+        # --- 4. Manually Upsert Chunks to Pinecone ---
+        logging.info("Preparing data and upserting to Pinecone...")
+        vectors_to_upsert = []
+        for i, chunk in enumerate(doc_chunks):
+            # Create a unique ID for each chunk
+            vector_id = f"chunk_{i}_{os.urandom(4).hex()}"
+            vectors_to_upsert.append({
+                "id": vector_id,
+                "values": embeddings[i],
+                "metadata": { "text": chunk.page_content, **chunk.metadata }
+            })
+
+        # Upsert data in batches
+        batch_size = 100
+        for i in range(0, len(vectors_to_upsert), batch_size):
+            batch = vectors_to_upsert[i:i + batch_size]
+            index.upsert(vectors=batch)
+            logging.info(f"Upserted batch {i//batch_size + 1}...")
+        
+        logging.info("Upsert process completed.")
+        
+        # --- 5. Wait and Verify ---
+        logging.info("Waiting 10 seconds for the Pinecone index to update...")
+        time.sleep(10)
+
+        stats = index.describe_index_stats()
+        final_count = stats.get('total_vector_count', 0)
+        logging.info(f"Final verification - Vector count in Pinecone: {final_count}")
+
+        if final_count == len(doc_chunks):
+            logging.info("✅ Success! Knowledge base has been populated correctly.")
+        else:
+            logging.error(f"❌ Mismatch after upsert. Expected {len(doc_chunks)} vectors, but found {final_count}.")
 
     except Exception as e:
-        logging.error(f"An error occurred during embedding or saving the vector store: {e}")
+        logging.error(f"An error occurred during the build process: {e}", exc_info=True)
 
 if __name__ == "__main__":
     create_knowledge_base()

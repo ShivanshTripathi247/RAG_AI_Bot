@@ -14,11 +14,20 @@ from langchain_pinecone import Pinecone
 from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings # New embedder
 from fastapi.middleware.cors import CORSMiddleware
 from langchain.schema.document import Document
-from langchain_community.vectorstores import FAISS
+from langchain.text_splitter import RecursiveCharacterTextSplitter # Added for change stream
 from langchain_huggingface import HuggingFaceEmbeddings, HuggingFaceEndpoint, HuggingFaceEndpointEmbeddings
-from langchain.prompts import PromptTemplate
+
+# --- NEW: Import ChatPromptTemplate for system instructions ---
+from langchain.prompts import ChatPromptTemplate, PromptTemplate
+# -----------------------------------------------------------
+
 from langchain.schema.runnable import RunnablePassthrough
 from langchain.schema.output_parser import StrOutputParser
+
+# --- Imports for Gemini ---
+from langchain_google_genai import ChatGoogleGenerativeAI
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
+# -------------------------
 
 # --- 1. INITIAL SETUP ---
 
@@ -28,88 +37,222 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # Load environment variables
 load_dotenv()
 HF_API_TOKEN = os.getenv("HF_API_TOKEN")
-HF_ENDPOINT_URL = os.getenv("HF_ENDPOINT_URL")
 MONGO_URI = os.getenv("MONGO_URI")
-FRONTEND_API_URL = os.getenv("FRONTEND_API_URL")
-BACKEND_API_URL = os.getenv("BACKEND_API_URL")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME")
 EMBEDDING_ENDPOINT_URL = os.getenv("EMBEDDING_ENDPOINT_URL")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# --- IMPORTANT: UPDATE THESE VALUES ---
-DB_NAME = "test"
-PRODUCTS_COLLECTION_NAME = "products" # <-- NEW: Added collection name for products
-ORDERS_COLLECTION_NAME = "orders"
-# ------------------------------------
+# Initialize global variables as None
+embedding_model = None
+vector_store = None
+retriever = None
+llm = None
+rag_chain = None
+mongo_client = None
+db = None
+orders_collection = None
+products_collection = None # Added for change stream
+pinecone_index = None # Added for direct access to the Pinecone index
 
-# Initialize models and retriever
-try:
-    logging.info("Initializing models and loading knowledge base...")
-    embedding_model = HuggingFaceEndpointEmbeddings(
-        model=EMBEDDING_ENDPOINT_URL,
-        huggingfacehub_api_token=HF_API_TOKEN
-    )
-
-    pc = PineconeClient(api_key=PINECONE_API_KEY)
-    vector_store = Pinecone.from_existing_index(PINECONE_INDEX_NAME, embedding_model)
-    retriever = vector_store.as_retriever(search_kwargs={"k": 3})
-
-    llm = HuggingFaceEndpoint(
-        endpoint_url=HF_ENDPOINT_URL,
-        huggingfacehub_api_token=HF_API_TOKEN,
-        task="text-generation",
-        max_new_tokens=512,
-        return_full_text=False
-    )
-    logging.info("Initialization complete.")
-except Exception as e:
-    logging.error(f"Failed to initialize models or load vector store: {e}")
-    raise
-
-# Connect to MongoDB
-try:
-    mongo_client = MongoClient(MONGO_URI)
-    db = mongo_client[DB_NAME]
-    products_collection = db[PRODUCTS_COLLECTION_NAME] # <-- NEW: Connect to products collection
-    orders_collection = db[ORDERS_COLLECTION_NAME]
-    logging.info("Successfully connected to MongoDB.")
-except Exception as e:
-    logging.error(f"Failed to connect to MongoDB: {e}")
-    raise
-
-# --- NEW: THREAD LOCK FOR SAFE INDEX UPDATES ---
-faiss_lock = threading.Lock()
+# --- NEW: Renamed THREAD LOCK FOR CLARITY ---
+vector_store_lock = threading.Lock()
 # ---------------------------------------------
 
-# --- 2. PROMPT & RAG CHAIN DEFINITION (No changes here) ---
-prompt_template = """
-Your name is DaVinci. You are a helpful and friendly e-commerce assistant. Name of the e-commerce platform is Idezign Studio. Your goal is to help users with their questions about products and their orders.
-Use the following context to answer the user's question. Always answer the question with proper markdown formatting. If the question are not related to e-commerce or Interior Decor say that you are not capable 
-of answering that. If you don't know the answer from the context, say you don't have that information.
+# --- 2. FASTAPI APPLICATION DEFINITION ---
+app = FastAPI(title="E-commerce AI Chatbot", description="An API for the e-commerce RAG chatbot.")
 
-**General Knowledge Context:**
-{general_context}
+origins = [
+    os.getenv("FRONTEND_API_URL"),
+    os.getenv("BACKEND_API_URL"),
+]
 
-**User's Recent Order History (if available):**
-{order_context}
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[origin for origin in origins if origin],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-**User's Question:**
-{question}
+# --- 3. STARTUP EVENT TO LOAD MODELS ---
+@app.on_event("startup")
+async def startup_event():
+    global embedding_model, vector_store, retriever, llm, rag_chain, mongo_client, db, orders_collection, products_collection, pinecone_index
 
-Helpful Answer:
-"""
-prompt = PromptTemplate.from_template(prompt_template)
-retrieval_chain = {
-    "general_context": itemgetter("question") | retriever,
-    "question": itemgetter("question"),
-    "order_context": itemgetter("order_context")
-}
-rag_chain = ( retrieval_chain | prompt | llm | StrOutputParser() )
+    logging.info("Application startup: Initializing services...")
+    
+    try:
+        # Embedding model and Pinecone connection
+        embedding_model = HuggingFaceEndpointEmbeddings(model=EMBEDDING_ENDPOINT_URL, huggingfacehub_api_token=HF_API_TOKEN)
+        pc = PineconeClient(api_key=PINECONE_API_KEY)
+        pinecone_index = pc.Index(PINECONE_INDEX_NAME) # Get a direct handle to the index
+        vector_store = Pinecone.from_existing_index(index_name=PINECONE_INDEX_NAME, embedding=embedding_model)
+        retriever = vector_store.as_retriever(search_kwargs={"k": 3})
 
-# --- 3. HELPER FUNCTIONS ---
+        # Initialize Gemini LLM
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-1.5-flash-latest",
+            google_api_key=GOOGLE_API_KEY,
+            safety_settings={
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            },
+            convert_system_message_to_human=True
+        )
+    
+        # MongoDB connection
+        DB_NAME = "test"
+        PRODUCTS_COLLECTION_NAME = "products"
+        ORDERS_COLLECTION_NAME = "orders"
+        mongo_client = MongoClient(MONGO_URI)
+        db = mongo_client[DB_NAME]
+        products_collection = db[PRODUCTS_COLLECTION_NAME]
+        orders_collection = db[ORDERS_COLLECTION_NAME]
+        
+        # --- PROMPT & RAG CHAIN DEFINITION ---
+        system_instruction = """Your name is DaVinci. You are a helpful and friendly e-commerce assistant for a platform named Idezign Studio.
+        Your goal is to help users with their questions about products and their orders in details, with enthusiasm.
+        Use only the context provided to answer the user's question. If you are providing product image link in the response please provide it with a text "**click here to view**" with markdown and highlighting. 
+        Always answer the question with proper markdown formatting, headings, text highlighting, specially the title of the product highlighted like **Product Name**.
+        If the questions are not related to e-commerce or Interior Decor, politely say that you are not capable of answering that.
+        If you don't know the answer from the context, say that you don't have enough information to answer."""
+
+        human_prompt_template = """
+        **General Knowledge Context:**
+        {general_context}
+
+        **User's Recent Order History (if available):**
+        {order_context}
+
+        **User's Question:**
+        {question}
+        """
+
+        chat_prompt = ChatPromptTemplate.from_messages([
+            ("system", system_instruction),
+            ("human", human_prompt_template),
+        ])
+
+        retrieval_chain = {"general_context": itemgetter("question") | retriever, "question": itemgetter("question"), "order_context": itemgetter("order_context")}
+        rag_chain = ( retrieval_chain | chat_prompt | llm | StrOutputParser() )
+        
+        logging.info("Initialization complete. Services are ready.")
+
+        # --- START THE BACKGROUND TASK ---
+        listener_thread = threading.Thread(target=listen_for_product_changes, daemon=True)
+        listener_thread.start()
+        # -------------------------------------------
+        
+    except Exception as e:
+        logging.error(f"FATAL: Failed to initialize services during startup: {e}", exc_info=True)
+        rag_chain = None
+
+# --- HELPER FUNCTION TO FORMAT PRODUCTS ---
+def format_product_for_langchain(product: dict) -> Document:
+    page_content = (
+        f"Product Name: {product.get('title', 'N/A')}. "
+        f"Description: {product.get('description', 'N/A')}. "
+        f"Price: ₹{product.get('price', 'N/A')}. "
+        f"Sale Price: ₹{product.get('salePrice', 'N/A')}. "
+        f"Category: {product.get('category', 'N/A')}. "
+        f"Stock: {product.get('totalStock', 'N/A')} units available."
+    )
+    metadata = {
+        "source": "mongodb_products",
+        "product_id": str(product.get('_id')),
+        "image_url": product.get('image', ''),
+    }
+    return Document(page_content=page_content, metadata=metadata)
+# -----------------------------------------------
+
+# --- CORRECTED MONGODB CHANGE STREAM LISTENER ---
+
+# # --- OLD, INCORRECT LISTENER (Designed for FAISS) ---
+# def listen_for_product_changes():
+#     logging.info("Starting MongoDB change stream listener...")
+#     try:
+#         with products_collection.watch(full_document='updateLookup') as stream:
+#             for change in stream:
+#                 operation_type = change['operationType']
+#                 logging.info(f"Change detected in products collection: {operation_type}")
+#
+#                 with faiss_lock: # Using a generic lock name, as it's for the vector store
+#                     if operation_type in ['insert', 'update']:
+#                         doc_id = str(change['documentKey']['_id'])
+#                         
+#                         # For Pinecone, we just upsert with the same ID to update
+#                         new_doc = format_product_for_langchain(change['fullDocument'])
+#                         vector_store.add_documents([new_doc], ids=[doc_id])
+#                         logging.info(f"Upserted product in index: {change['fullDocument'].get('title', 'N/A')}")
+#
+#                     elif operation_type == 'delete':
+#                         doc_id = str(change['documentKey']['_id'])
+#                         vector_store.delete([doc_id])
+#                         logging.info(f"Deleted product from index with ID: {doc_id}")
+#     except Exception as e:
+#         logging.error(f"Error in MongoDB change stream: {e}", exc_info=True)
+# # ----------------------------------------------------
+
+
+# --- NEW, CORRECTED LISTENER (For Pinecone) ---
+def listen_for_product_changes():
+    logging.info("Starting MongoDB change stream listener for Pinecone...")
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=250, chunk_overlap=40)
+    
+    try:
+        with products_collection.watch(full_document='updateLookup') as stream:
+            for change in stream:
+                operation_type = change['operationType']
+                doc_id = str(change['documentKey']['_id'])
+                logging.info(f"Change detected for product {doc_id}: {operation_type}")
+
+                with vector_store_lock:
+                    # For both insert and update, we delete the old chunks and upsert the new ones
+                    if operation_type in ['insert', 'update']:
+                        # Delete existing chunks for this product to handle updates correctly
+                        pinecone_index.delete(filter={"product_id": doc_id})
+
+                        # Format, chunk, embed, and upsert the new document
+                        new_doc = format_product_for_langchain(change['fullDocument'])
+                        doc_chunks = text_splitter.split_documents([new_doc])
+                        
+                        texts_to_embed = [chunk.page_content for chunk in doc_chunks]
+                        embeddings = embedding_model.embed_documents(texts_to_embed)
+
+                        vectors_to_upsert = []
+                        for i, chunk in enumerate(doc_chunks):
+                            chunk_id = f"{doc_id}_chunk_{i}"
+                            vectors_to_upsert.append({
+                                "id": chunk_id,
+                                "values": embeddings[i],
+                                "metadata": {"text": chunk.page_content, **chunk.metadata}
+                            })
+                        
+                        if vectors_to_upsert:
+                            pinecone_index.upsert(vectors=vectors_to_upsert)
+                            logging.info(f"Upserted {len(vectors_to_upsert)} chunks for product: {doc_id}")
+
+                    elif operation_type == 'delete':
+                        # Delete all chunks associated with this product_id
+                        pinecone_index.delete(filter={"product_id": doc_id})
+                        logging.info(f"Deleted all chunks for product from index with ID: {doc_id}")
+
+    except Exception as e:
+        logging.error(f"Error in MongoDB change stream: {e}", exc_info=True)
+# ------------------------------------------
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
+class Query(BaseModel):
+    question: str
+    user_id: Optional[str] = Field(None, description="Optional user ID for personalized queries")
 
 def fetch_user_orders(user_id: str) -> str:
-    # (No changes to this function)
     try:
         recent_orders = list(orders_collection.find({"userId": user_id}).sort("orderDate", -1).limit(3))
         if not recent_orders:
@@ -128,109 +271,20 @@ def fetch_user_orders(user_id: str) -> str:
         logging.error(f"Error fetching orders for user {user_id}: {e}")
         return "There was an error retrieving your order history."
 
-# --- NEW: HELPER FUNCTION TO FORMAT PRODUCTS ---
-def format_product_for_langchain(product: dict) -> Document:
-    page_content = (
-        f"Product Name: {product.get('title', 'N/A')}. "
-        f"Description: {product.get('description', 'N/A')}. "
-        f"Price: ₹{product.get('price', 'N/A')}. "
-                    f"Sale Price: ₹{product.get('salePrice', 'N/A')}. "
-
-        f"Category: {product.get('category', 'N/A')}. "
-        f"Stock: {product.get('totalStock', 'N/A')} units available."
-    )
-    metadata = {
-        "source": "mongodb_products",
-        "product_id": str(product.get('_id')),
-        "image_url": product.get('image', ''),
-        "price": product.get('price', 0),
-        "salePrice": product.get('salePrice', 0)
-    }
-    return Document(page_content=page_content, metadata=metadata)
-# -----------------------------------------------
-
-# --- NEW: MONGODB CHANGE STREAM LISTENER ---
-def listen_for_product_changes():
-    logging.info("Starting MongoDB change stream listener...")
-    try:
-        with products_collection.watch(full_document='updateLookup') as stream:
-            for change in stream:
-                operation_type = change['operationType']
-                logging.info(f"Change detected in products collection: {operation_type}")
-
-                with faiss_lock:
-                    if operation_type in ['insert', 'update']:
-                        doc_id = str(change['documentKey']['_id'])
-                        # For updates, we delete the old entry first
-                        if operation_type == 'update':
-                            # This is a simplified delete; requires iterating to find the doc to delete
-                            ids_to_delete = [
-                                i for i, doc in vector_store.docstore._dict.items() 
-                                if doc.metadata.get("product_id") == doc_id
-                            ]
-                            if ids_to_delete:
-                                vector_store.delete(ids_to_delete)
-                                logging.info(f"Deleted old version of product ID {doc_id} for update.")
-                        
-                        new_doc = format_product_for_langchain(change['fullDocument'])
-                        vector_store.add_documents([new_doc])
-                        logging.info(f"Added/Updated product in index: {change['fullDocument'].get('title', 'N/A')}")
-
-                    elif operation_type == 'delete':
-                        doc_id = str(change['documentKey']['_id'])
-                        ids_to_delete = [
-                            i for i, doc in vector_store.docstore._dict.items() 
-                            if doc.metadata.get("product_id") == doc_id
-                        ]
-                        if ids_to_delete:
-                            vector_store.delete(ids_to_delete)
-                            logging.info(f"Deleted product from index with ID: {doc_id}")
-                    
-                    vector_store.save_local("faiss_index")
-                    logging.info("FAISS index updated and saved to disk.")
-    except Exception as e:
-        logging.error(f"Error in MongoDB change stream: {e}", exc_info=True)
-# ------------------------------------------
-
-# --- 4. FASTAPI APPLICATION ---
-app = FastAPI(title="E-commerce AI Chatbot", description="An API for the e-commerce RAG chatbot.")
-
-origins = [
-    FRONTEND_API_URL, # Your React frontend's origin
-    BACKEND_API_URL, # Another common React port
-    # Add your production frontend URL here when you deploy
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"], # Allows all methods (GET, POST, etc.)
-    allow_headers=["*"], # Allows all headers
-)
-
-# --- NEW: START THE BACKGROUND TASK ON APP STARTUP ---
-@app.on_event("startup")
-async def startup_event():
-    listener_thread = threading.Thread(target=listen_for_product_changes, daemon=True)
-    listener_thread.start()
-# ----------------------------------------------------
-
-class Query(BaseModel):
-    question: str
-    user_id: Optional[str] = Field(None, description="Optional user ID for personalized queries")
-
 @app.post("/ask", summary="Ask the chatbot a question")
 def ask_question(query: Query):
+    if not rag_chain:
+        raise HTTPException(status_code=503, detail="Service is warming up or has failed to initialize. Please try again in a moment.")
+    
     question = query.question
     user_id = query.user_id
     image_url = ""
 
-    with faiss_lock: # Use lock to ensure we read a stable index
+    # Using a lock to ensure thread-safe reads from the vector store
+    with vector_store_lock: 
         if user_id:
             order_context = fetch_user_orders(user_id)
-            general_context = "\n".join([doc.page_content for doc in retriever.invoke(question)])
-            response = rag_chain.invoke({"general_context": general_context, "order_context": order_context, "question": question})
+            response = rag_chain.invoke({"order_context": order_context, "question": question})
             response_type = "answer"
         else:
             login_keywords = ["my order", "my account", "track package", "where is my stuff"]
@@ -242,7 +296,13 @@ def ask_question(query: Query):
                 general_context = "\n".join([doc.page_content for doc in retrieved_docs])
                 if retrieved_docs:
                     image_url = retrieved_docs[0].metadata.get("image_url", "")
-                response = rag_chain.invoke({"general_context": general_context, "order_context": "User is not logged in.", "question": question})
+                
+                response = rag_chain.invoke({
+                    "general_context": general_context,
+                    "order_context": "User is not logged in.",
+                    "question": question
+                })
                 response_type = "answer"
 
     return {"response_type": response_type, "answer": response, "image_url": image_url}
+
