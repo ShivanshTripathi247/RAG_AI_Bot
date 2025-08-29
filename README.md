@@ -1,145 +1,122 @@
-AI-Powered RAG Chatbot for E-commerce
-This repository contains the complete source code for an advanced AI chatbot designed for an e-commerce platform. The chatbot leverages a Retrieval-Augmented Generation (RAG) architecture to provide accurate, context-aware responses to user queries about products, policies, and personal orders.
+# AI-Powered RAG Chatbot for E-commerce
 
-<!-- Replace with a URL to a screenshot of your chatbot -->
+[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-00a393.svg)](https://fastapi.tiangolo.com/)
+[![React](https://img.shields.io/badge/React-18+-61dafb.svg)](https://reactjs.org/)
+[![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-Transformers-yellow)](https://huggingface.co/)
+[![MongoDB](https://img.shields.io/badge/MongoDB-4.4+-green.svg)](https://www.mongodb.com/)
+[![Pinecone](https://img.shields.io/badge/Pinecone-Vector%20DB-purple.svg)](https://www.pinecone.io/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-🚀 Features
-Context-Aware Responses: Uses a RAG pipeline to ground answers in factual data, preventing LLM hallucinations.
+This repository contains the source code for an advanced AI chatbot built for an e-commerce platform.  
+It uses a **Retrieval-Augmented Generation (RAG)** architecture with the **Google Gemini API** and a **Pinecone vector store** to provide accurate, context-aware responses based on the business's own data.
 
-Structured Product Display: Displays product search results in clean, interactive cards instead of a wall of text.
+---
 
-Personalized Experience: Fetches real-time order history for logged-in users to provide personalized support.
+## 🛠️ Core Technologies
+- **Backend**: FastAPI (Python), LangChain  
+- **Frontend**: ReactJS (Vite)  
+- **AI & Data**: Google Gemini, Pinecone, Hugging Face (for embeddings), MongoDB  
 
-Real-Time Knowledge Updates: Utilizes MongoDB Change Streams to automatically update the vector database whenever products are added or modified.
+---
 
-Dual User Modes: Seamlessly handles sessions for both guest users (general queries) and authenticated users (personalized queries).
-
-Scalable & Lightweight Backend: The core backend is designed to be a lightweight orchestrator, offloading heavy ML tasks to dedicated services for high performance and low cost.
-
-🛠️ Architecture & Tech Stack
-This project uses a modern, decoupled architecture to ensure scalability and maintainability.
-
-Backend: FastAPI (Python)
-
-Frontend: ReactJS (with Vite)
-
-Primary LLM: Google Gemini API (gemini-1.5-flash) for response generation.
-
-Embedding Model: Hugging Face Inference Endpoint (sentence-transformers/all-MiniLM-L6-v2).
-
-Vector Database: Pinecone (cloud-hosted) for efficient similarity search.
-
-Primary Database: MongoDB for storing product, user, and order data.
-
-Deployment: The backend is configured for deployment on cloud platforms like GCP, Render, or Hugging Face Spaces.
-
-⚙️ Setup and Installation
+## 🚀 Getting Started
 Follow these steps to set up and run the project locally.
 
-Prerequisites
-Python 3.10+
+### Prerequisites
+- Python 3.10+  
+- Node.js 18+  
+- A MongoDB database  
+- API keys for **Google Gemini**, **Hugging Face**, and **Pinecone**  
 
-Node.js 18+
+---
 
-A MongoDB database and its connection URI.
+### 1. Installation
 
-API keys for:
+First, clone the repository and install the dependencies for both the frontend and backend.
 
-Google Gemini
+```bash
+# 1. Clone the repository
+git clone https://github.com/ShivanshTripathi247/RAG_AI_Bot.git
+cd RAG_AI_Bot
 
-Hugging Face (with write permissions)
-
-Pinecone
-
-1. Backend Setup
-First, set up the Python backend server.
-
-# Clone the repository
-git clone <your-repository-url>
-cd <repository-name>/backend  # Navigate to your backend folder
-
-# Create and activate a Python virtual environment
+# 2. Set up the backend
 python -m venv venv
-source venv/bin/activate  # On Windows, use: venv\Scripts\activate
-
-# Install the required dependencies
+source venv/bin/activate   # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-Next, create the environment variables file.
 
-Create a file named .env in the backend's root directory.
+```
 
-Add the following keys, replacing the placeholder values with your actual credentials:
+---
 
-# Gemini API Key
-GOOGLE_API_KEY="AIza..."
+### 2. Environment Setup
 
-# Hugging Face API Key
-HF_API_TOKEN="hf_..."
+You will need to create `.env` files to store your API keys and configuration variables.
 
-# Hugging Face Endpoint URL for the EMBEDDING MODEL
-EMBEDDING_ENDPOINT_URL="[https://your-embedding-endpoint.aws.endpoints.huggingface.cloud](https://your-embedding-endpoint.aws.endpoints.huggingface.cloud)"
+#### Backend (`backend/.env`)
 
-# Pinecone Credentials
-PINECONE_API_KEY="your-pinecone-api-key"
-PINECONE_INDEX_NAME="rag-bot" # Or your chosen index name
+Create a `.env` file in the `/backend` directory and add the following keys
+(**do not commit this file to version control**):
 
-# MongoDB Credentials
-MONGO_URI="mongodb+srv://..."
-DB_NAME="test"
-PRODUCTS_COLLECTION_NAME="products"
-ORDERS_COLLECTION_NAME="orders"
+```env
+GOOGLE_API_KEY=your_google_api_key
+HF_API_TOKEN=your_huggingface_api_token
+EMBEDDING_ENDPOINT_URL=your_hf_embedding_endpoint
+PINECONE_API_KEY=your_pinecone_api_key
+PINECONE_INDEX_NAME=your_index_name
+MONGO_URI=your_mongo_uri
+DB_NAME=test
+PRODUCTS_COLLECTION_NAME=products
+ORDERS_COLLECTION_NAME=orders
+FRONTEND_API_URL=http://localhost:5173
+```
 
-# Frontend URL (for CORS)
-FRONTEND_API_URL="http://localhost:5173"
+#### Frontend (`frontend/.env.local`)
 
-2. Frontend Setup
-Now, set up the React frontend.
+Create a `.env.local` file in the `/frontend` directory and add the following key:
 
-# Navigate to your frontend folder from the root directory
-cd ../frontend
+```env
+VITE_RAGBOT_API_URL=http://127.0.0.1:8000
+```
 
-# Install the required dependencies
-npm install
+---
 
-Next, create the environment variables file for the frontend.
+### 3. Running the Application
 
-Create a file named .env.local in the frontend's root directory.
+1. **Populate the Vector Database**
+   Before the first run, you need to load your data into Pinecone. From the `/backend` directory (with your virtual environment active), run:
 
-Add the following key, pointing to your local backend server:
+   ```bash
+   python build_knowledge_base.py
+   ```
 
-VITE_RAGBOT_API_URL=[http://127.0.0.1:8000](http://127.0.0.1:8000)
+2. **Start the Backend Server**
+   From the `/backend` directory:
 
-▶️ Running the Application
-Step 1: Populate the Vector Database
-Before you can run the application, you must populate your Pinecone index with your product and website data.
+   ```bash
+   uvicorn main:app --host 127.0.0.1 --port 8000 --reload
+   ```
 
-Ensure you have your static content (e.g., about_us.txt) in the backend/data directory.
 
-From the backend directory, run the build script:
 
-# Make sure your venv is active
-python build_knowledge_base.py
+Your application is now running 🎉
 
-This script will connect to your MongoDB, read your products, load your text files, and upload everything to Pinecone.
+---
 
-Step 2: Start the Backend Server
-With the vector database populated, you can start the API server.
+## 📄 Note on Integration
 
-# From the backend directory with venv active
-uvicorn main:app --host 127.0.0.1 --port 8000 --reload
+This repository contains the source code for the RAG chatbot backend and a sample React frontend component only.
+It is designed to be a standalone service that can be integrated into any existing e-commerce website.
 
-Your backend is now running at http://127.0.0.1:8000.
+The **full frontend and backend** of your primary e-commerce application will be unique to your project.
+This chatbot is intended to plug into that existing infrastructure.
 
-Step 3: Start the Frontend Application
-Finally, start the React development server.
+---
 
-# From the frontend directory
-npm run dev
+## 📬 Contact
 
-Your application should now be accessible in your browser, typically at http://localhost:5173. The chatbot will be fully functional and connected to your local backend.
+For any inquiries, collaborations, or questions about this project, feel free to reach out:
 
-☁️ Deployment
-Backend: The backend is configured for deployment on cloud services like Render or GCP Compute Engine. The main.py file includes a health check endpoint at /health for platform compatibility.
-
-Frontend: The React application can be deployed on static hosting platforms like Vercel or Netlify. Remember to update the VITE_RAGBOT_API_URL environment variable to point to your live backend's URL.
+* **LinkedIn**: [Connect with me](https://www.linkedin.com/in/shivansh-tripathi-4ab52a246/)
+* **Email**: [shivansht06@gmail.com](mailto:shivansht06@gmail.com)
