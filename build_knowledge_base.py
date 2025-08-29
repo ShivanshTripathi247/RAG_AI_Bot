@@ -1,10 +1,13 @@
 import os
 from pymongo import MongoClient
 from dotenv import load_dotenv
+from pinecone import Pinecone as PineconeClient
+from langchain_pinecone import Pinecone
+from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings
 from langchain.schema.document import Document
 from langchain_community.document_loaders import DirectoryLoader
 from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings, HuggingFaceEndpointEmbeddings  
 import logging
 
 # Configure logging
@@ -86,15 +89,22 @@ def create_knowledge_base():
     # 5. Embed and Store in FAISS
     try:
         logging.info("Initializing embedding model...")
-        embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-        
-        logging.info("Creating FAISS vector store from all documents. This may take a while...")
-        # Use the combined list of all documents
-        vector_store = FAISS.from_documents(all_documents, embedding_model)
-        
-        # 6. Save to Disk
-        vector_store.save_local("faiss_index")
-        logging.info("✅ Knowledge base updated successfully and saved to the 'faiss_index' folder.")
+        HF_API_TOKEN = os.getenv("HF_API_TOKEN")
+        PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+        PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME")
+        EMBEDDING_ENDPOINT_URL = os.getenv("EMBEDDING_ENDPOINT_URL") 
+        embedding_model = HuggingFaceEndpointEmbeddings(
+            model=EMBEDDING_ENDPOINT_URL,
+            huggingfacehub_api_token=HF_API_TOKEN
+        )
+
+        pc = PineconeClient(api_key=PINECONE_API_KEY)
+        vector_store = Pinecone.from_existing_index(
+            index_name=PINECONE_INDEX_NAME, 
+            embedding=embedding_model
+        )
+        logging.info("✅ Knowledge base successfully uploaded to Pinecone.")
+
     except Exception as e:
         logging.error(f"An error occurred during embedding or saving the vector store: {e}")
 

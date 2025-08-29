@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 import threading
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -8,10 +9,13 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 from operator import itemgetter
 
+from pinecone import Pinecone as PineconeClient
+from langchain_pinecone import Pinecone
+from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings # New embedder
 from fastapi.middleware.cors import CORSMiddleware
 from langchain.schema.document import Document
 from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings, HuggingFaceEndpoint
+from langchain_huggingface import HuggingFaceEmbeddings, HuggingFaceEndpoint, HuggingFaceEndpointEmbeddings
 from langchain.prompts import PromptTemplate
 from langchain.schema.runnable import RunnablePassthrough
 from langchain.schema.output_parser import StrOutputParser
@@ -28,6 +32,9 @@ HF_ENDPOINT_URL = os.getenv("HF_ENDPOINT_URL")
 MONGO_URI = os.getenv("MONGO_URI")
 FRONTEND_API_URL = os.getenv("FRONTEND_API_URL")
 BACKEND_API_URL = os.getenv("BACKEND_API_URL")
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME")
+EMBEDDING_ENDPOINT_URL = os.getenv("EMBEDDING_ENDPOINT_URL")
 
 # --- IMPORTANT: UPDATE THESE VALUES ---
 DB_NAME = "test"
@@ -38,8 +45,13 @@ ORDERS_COLLECTION_NAME = "orders"
 # Initialize models and retriever
 try:
     logging.info("Initializing models and loading knowledge base...")
-    embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    vector_store = FAISS.load_local("faiss_index", embedding_model, allow_dangerous_deserialization=True)
+    embedding_model = HuggingFaceEndpointEmbeddings(
+        model=EMBEDDING_ENDPOINT_URL,
+        huggingfacehub_api_token=HF_API_TOKEN
+    )
+
+    pc = PineconeClient(api_key=PINECONE_API_KEY)
+    vector_store = Pinecone.from_existing_index(PINECONE_INDEX_NAME, embedding_model)
     retriever = vector_store.as_retriever(search_kwargs={"k": 3})
 
     llm = HuggingFaceEndpoint(
